@@ -58,15 +58,21 @@ import (
 )
 
 const (
-	// ClusterTopHyperNode is the common root for all HyperNodes in the snapshot.
-	// During the session open phase, a virtual cluster-level top-tier HyperNode is created in the snapshot, simplifying subsequent scheduling logic.
-	// Its Tier value is set to the maximum existing Tier + 1 among real HyperNodes. This is recalculated every time a session opens.
-	// If no real HyperNodes exist in the cluster, this virtual top-tier HyperNode will still exist with Tier = 1 and will encompass all Nodes in the cluster.
+	// ClusterTopHyperNode 是快照中所有 HyperNode 的公共根节点。
+	// 在 Session 开启阶段，快照中会创建一个虚拟的集群级顶层 HyperNode，以简化后续的树形拓扑调度计算。
+	// 其 Tier 值设置为现有真实 HyperNode 最大 Tier + 1；若集群没有真实 HyperNode，则 Tier 为 1 并包含集群全部节点。
 	ClusterTopHyperNode = "<cluster-top-hypernode>"
 )
 
-// Session information for the current session
+// Session 代表 Volcano 调度器单次调度周期的会话上下文。
+// 在每次调度周期启动时创建（OpenSession），并在调度周期结束时销毁（CloseSession）。
+// 核心职责：
+// 1. 状态快照（Snapshot）：持有从 SchedulerCache 捕获的集群最新状态视图（Jobs, Nodes, Queues, HyperNodes 等）；
+// 2. 插件扩展点挂载（Extension Points）：存储所有配置插件注册的各类算法回调（排序、过滤、打分、准入、抢占等）；
+// 3. 事务操作入口（Statement）：提供分配（Allocate）、预留（Pipeline）、驱逐（Evict）操作的事务试探与提交机制；
+// 4. Kubernetes 调度框架兼容层：适配 K8s scheduler framework 的 CycleState、NodeInfo 及 PodLister。
 type Session struct {
+	// UID 当前 Session 的唯一标识符
 	UID types.UID
 
 	kubeClient            kubernetes.Interface
@@ -77,53 +83,58 @@ type Session struct {
 	restConfig            *rest.Config
 	informerFactory       informers.SharedInformerFactory
 
+	// TotalResource 集群所有可分配资源总量
 	TotalResource *api.Resource
-	// PodGroupOldState contains podgroup status and annotations during schedule
-	// This should not be mutated after initiated
+	// PodGroupOldState 调度期间 PodGroup 的初始状态和注解快照，初始化后只读，用于周期结束时做增量变更比对
 	PodGroupOldState *api.PodGroupOldState
-	// DirtyJobs include the jobs that need to flush to SchedulerCache on session close
+	// DirtyJobs 记录在本次会话中发生状态变更、需要在 Session 关闭时持久化写回 SchedulerCache 的作业 ID 集合
 	DirtyJobs sets.Set[api.JobID]
 
-	// schGateManager is the scheduler gate manager, passed in from the Scheduler.
-	// Nil when SchedulingGatesQueueAdmission feature gate is disabled.
+	// schGateManager 调度门控管理器（Scheduling Gates），用于在入队前控制 Pod 的调度准备状态
 	schGateManager *gate.SchGateManager
 
+	// Jobs 当前集群中所有 Job 对象的快照
 	Jobs           map[api.JobID]*api.JobInfo
+	// Nodes 当前集群中所有物理节点的快照
 	Nodes          map[string]*api.NodeInfo
+	// CSINodesStatus 记录 CSI 存储节点驱动信息，用于卷绑定相关的过滤
 	CSINodesStatus map[string]*api.CSINodeStatusInfo
+	// RevocableNodes 可撤销资源节点
 	RevocableNodes map[string]*api.NodeInfo
+	// Queues 当前集群中所有调度队列的快照
 	Queues         map[api.QueueID]*api.QueueInfo
+	// NamespaceInfo 命名空间信息快照
 	NamespaceInfo  map[api.NamespaceName]*api.NamespaceInfo
 
-	// NodeMap is like Nodes except that it uses k8s NodeInfo api and should only
-	// be used in k8s compatible api scenarios such as in predicates and nodeorder plugins.
+	// NodeMap 转换为兼容 Kubernetes 调度框架的 fwk.NodeInfo 映射，供原生 Predicates 和 NodeOrder 插件使用
 	NodeMap   map[string]fwk.NodeInfo
+	// PodLister Pod 列表检索器，用于亲和性计算和跨 Pod 预选过滤
 	PodLister *PodLister
 
+	// Tiers 调度器配置中定义的多层插件配置
 	Tiers          []conf.Tier
 	Configurations []conf.Configuration
 	NodeList       []*api.NodeInfo
-	// HyperNodes stores the HyperNodeInfo of each HyperNode
+	// HyperNodes 保存每个超节点（网络机架、TOR、交换机聚合拓扑）的拓扑信息
 	HyperNodes           api.HyperNodeInfoMap
 	HyperNodeTierNameMap api.HyperNodeTierNameMap
-	// HyperNodesSetByTier contains a set of hyperNodes by tier from down to top, nodes under the same hyperNode
-	// have the same topology domain, e.g., nodes under the same switch or tor, jobs allocated in the same
-	// hyperNode can gain a better performance, the lower the tier of hyperNode, the better performance.
+	// HyperNodesSetByTier 按层级保存 HyperNode 名称集合，层级越低，拓扑亲和性越高、网络通信性能越佳
 	HyperNodesSetByTier map[int]sets.Set[string]
 	HyperNodesTiers     []int
-	// RealNodesList maps hyperNode Name -> nodes under the hyperNode.
+	// RealNodesList 记录每个 HyperNode 所覆盖的物理节点列表
 	RealNodesList             map[string][]*api.NodeInfo
 	RealNodesSet              map[string]sets.Set[string]
 	HyperNodesReadyToSchedule bool
 	HyperNodeGeneration       uint64
-	// podGroupPlacementJobs contains policy owners and peers selected by enabled
-	// group topology rules in this Session. Unrelated Jobs do not track placement.
 	podGroupPlacementJobs    sets.Set[api.JobID]
 	hyperNodeIndex           *api.HyperNodeIndex
 	hyperNodeIndexGeneration uint64
 
+	// plugins 当前会话中已激活的插件实例集合
 	plugins             map[string]Plugin
+	// eventHandlers 事件处理器列表，在任务 Allocate/Deallocate 时接收通知
 	eventHandlers       []*EventHandler
+	// 以下为各类插件注册的扩展点函数字典
 	jobOrderFns         map[string]api.CompareFn
 	queueOrderFns       map[string]api.CompareFn
 	victimQueueOrderFns map[string]api.VictimCompareFn
@@ -725,14 +736,17 @@ func (ssn *Session) PredicateForPreemptAction(task *api.TaskInfo, node *api.Node
 	return nil
 }
 
-// Statement returns new statement object
+// Statement 为当前会话开启一个新的调度事务（Statement）。
+// 推荐在调度动作（如 allocate、preempt 等）中使用 Statement 来进行试探性分配或驱逐，
+// 从而在 Gang 失败时可以统一通过 stmt.Discard() 整体回滚，成功时通过 stmt.Commit() 整体提交。
 func (ssn *Session) Statement() *Statement {
 	return &Statement{
 		ssn: ssn,
 	}
 }
 
-// Pipeline  the task to the node in the session
+// Pipeline 在会话中为任务执行流水线预留（非事务直接调用模式）。
+// 当目标节点已有任务处于释放阶段（Releasing）时，待调度任务可抢先 Pipeline 占位。
 func (ssn *Session) Pipeline(task *api.TaskInfo, hostname string) error {
 	// Only update status in session
 	job, found := ssn.Jobs[task.Job]
@@ -771,7 +785,9 @@ func (ssn *Session) Pipeline(task *api.TaskInfo, hostname string) error {
 	return nil
 }
 
-// Allocate the task to the node in the session
+// Allocate 在会话中为任务分配节点资源（非事务直接调用模式）。
+// 如果本次分配后作业满足了 Gang 就绪条件（ssn.JobReady(job) == true），
+// 会自动将该作业下所有处于 Allocated 状态的任务 dispatch 发送至底层缓存执行实际节点绑定。
 func (ssn *Session) Allocate(task *api.TaskInfo, nodeInfo *api.NodeInfo) (err error) {
 	hostname := nodeInfo.Name
 	task.Pod.Spec.NodeName = hostname
@@ -824,6 +840,7 @@ func (ssn *Session) Allocate(task *api.TaskInfo, nodeInfo *api.NodeInfo) (err er
 	return nil
 }
 
+// dispatch 将分配完成的任务构建成 BindContext，发送到底层 Cache 的异步绑定队列，并将状态置为 Binding。
 func (ssn *Session) dispatch(task *api.TaskInfo) error {
 	bindContext := ssn.CreateBindContext(task)
 	if err := ssn.cache.AddBindTask(bindContext); err != nil {
@@ -894,7 +911,8 @@ func (ssn *Session) GetCycleState(taskID api.TaskID) *k8sframework.CycleState {
 	return obj.(*k8sframework.CycleState)
 }
 
-// Evict the task in the session
+// Evict 在会话中执行驱逐操作（非事务直接调用模式）。
+// 向底层 Cache 发送驱逐请求，将任务在 Job 中的状态设为 Releasing，并通知已注册的 DeallocateFunc 处理器。
 func (ssn *Session) Evict(reclaimee *api.TaskInfo, reason string) error {
 	if err := ssn.cache.Evict(reclaimee, reason); err != nil {
 		return err
@@ -926,12 +944,13 @@ func (ssn *Session) Evict(reclaimee *api.TaskInfo, reason string) error {
 	return nil
 }
 
-// BindPodGroup bind PodGroup to specified cluster
+// BindPodGroup 将 PodGroup 绑定到指定的多集群集群（Cluster）。
 func (ssn *Session) BindPodGroup(job *api.JobInfo, cluster string) error {
 	return ssn.cache.BindPodGroup(job, cluster)
 }
 
-// UpdatePodGroupCondition update job condition accordingly.
+// UpdatePodGroupCondition 更新作业关联的 PodGroupCondition（如 PodGroupScheduled 或 PodGroupUnschedulable）。
+// 插件（如 gang 插件）在调度周期关闭时通过此方法回写调度状态和不可调度原因。
 func (ssn *Session) UpdatePodGroupCondition(jobInfo *api.JobInfo, cond *scheduling.PodGroupCondition) error {
 	job, ok := ssn.Jobs[jobInfo.UID]
 	if !ok {

@@ -30,7 +30,8 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/api"
 )
 
-// TimeJitterAfter means: new after old + duration + jitter
+// TimeJitterAfter 判断 new 时间是否晚于 (old + duration + 随机抖动时间 jitter)。
+// 用于状态刷新节流或防止大量任务在同一瞬间并发重试引起的惊群效应。
 func TimeJitterAfter(new, old time.Time, duration, maxJitter time.Duration) bool {
 	var jitter int64
 	if maxJitter > 0 {
@@ -39,11 +40,13 @@ func TimeJitterAfter(new, old time.Time, duration, maxJitter time.Duration) bool
 	return new.After(old.Add(duration + time.Duration(jitter)))
 }
 
+// JobUpdater 用于在调度周期结束时，多 worker 并发将内存中作业（Job）和 PodGroup 的最新状态同步更新到底层缓存和持久化存储。
 type JobUpdater struct {
 	ssn      *Session
 	jobQueue []*api.JobInfo
 }
 
+// NewJobUpdater 构造 JobUpdater，提取当前 Session 中的全部作业列表准备批量更新。
 func NewJobUpdater(ssn *Session) *JobUpdater {
 	queue := make([]*api.JobInfo, 0, len(ssn.Jobs))
 	for _, job := range ssn.Jobs {
@@ -57,10 +60,13 @@ func NewJobUpdater(ssn *Session) *JobUpdater {
 	return ju
 }
 
+// UpdateAll 并行执行所有 Job 的状态写回操作，工作协程数由 options.GetJobUpdaterWorkerNum() 决定。
 func (ju *JobUpdater) UpdateAll() {
 	workqueue.ParallelizeUntil(context.TODO(), options.GetJobUpdaterWorkerNum(), len(ju.jobQueue), ju.updateJob)
 }
 
+// isPodGroupConditionsUpdated 检查新旧 PodGroupCondition 列表是否发生实质性变化。
+// 比较时会忽略 LastTransitionTime 和 TransitionID，仅当状态、原因或消息有变化时才判定为已更新。
 func isPodGroupConditionsUpdated(newCondition, oldCondition []scheduling.PodGroupCondition) bool {
 	if len(newCondition) != len(oldCondition) {
 		return true
@@ -91,6 +97,7 @@ func isPodGroupConditionsUpdated(newCondition, oldCondition []scheduling.PodGrou
 	return false
 }
 
+// isPodGroupStatusUpdated 检查 PodGroup 的 Status（除去 Condition 的主体状态以及 Conditions 列表）是否发生变化。
 func isPodGroupStatusUpdated(newStatus, oldStatus scheduling.PodGroupStatus) bool {
 	newCondition := newStatus.Conditions
 	newStatus.Conditions = nil
@@ -100,13 +107,14 @@ func isPodGroupStatusUpdated(newStatus, oldStatus scheduling.PodGroupStatus) boo
 	return !equality.Semantic.DeepEqual(newStatus, oldStatus) || isPodGroupConditionsUpdated(newCondition, oldCondition)
 }
 
+// isJobAllocatedHyperNodeChanged 检查 Job 分配的 HyperNode 注解是否发生了变更。
 func (ju *JobUpdater) isJobAllocatedHyperNodeChanged(job *api.JobInfo) bool {
 	oldHyperNode := ju.ssn.PodGroupOldState.Annotations[job.UID][api.JobAllocatedHyperNode]
 	return oldHyperNode != job.PodGroup.GetAnnotations()[api.JobAllocatedHyperNode]
 }
 
-// syncAllocatedHyperNodeAnnotation serializes the in-memory placement so the
-// cache writeback persists allocation and scale-in changes across sessions.
+// syncAllocatedHyperNodeAnnotation 将内存中计算出的作业拓扑分配位置（AllocatedHyperNode）
+// 同步序列化写入到 PodGroup 的 Annotations 中，以保证跨调度周期的持久化。
 func syncAllocatedHyperNodeAnnotation(job *api.JobInfo) {
 	if job.PodGroup == nil {
 		return
@@ -132,17 +140,19 @@ func syncAllocatedHyperNodeAnnotation(job *api.JobInfo) {
 	annotations[api.JobAllocatedHyperNode] = job.AllocatedHyperNode
 }
 
-// updateJob update specified job
+// updateJob 执行单个 Job 的状态比对与持久化更新操作。
 func (ju *JobUpdater) updateJob(index int) {
 	job := ju.jobQueue[index]
 	ssn := ju.ssn
 
+	// 重新计算并赋予 PodGroup 最新的 Status（Phase、Running/Failed 任务计数等）
 	job.PodGroup.Status = jobStatus(ssn, job)
 	syncAllocatedHyperNodeAnnotation(job)
 	oldStatus, found := ssn.PodGroupOldState.Status[job.UID]
 	updatePGStatus := !found || isPodGroupStatusUpdated(job.PodGroup.Status, oldStatus)
 	updatePGAnnotations := ju.isJobAllocatedHyperNodeChanged(job)
 	updateJobInfo := ssn.DirtyJobs.Has(job.UID)
+	// 仅在状态、注解或 Job 自身发生变更（Dirty）时才向底层 Cache 触发实际写回
 	if _, err := ssn.cache.UpdateJobStatus(job, updatePGStatus, updatePGAnnotations, updateJobInfo); err != nil {
 		klog.Errorf("Failed to update job <%s/%s>: %v",
 			job.Namespace, job.Name, err)

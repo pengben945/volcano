@@ -36,32 +36,33 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/util"
 )
 
-// AddJobOrderFn add job order function
+// AddJobOrderFn 注册作业排序函数（JobOrderFn），用于在调度周期中对待调度 Job 进行优先级排序。
 func (ssn *Session) AddJobOrderFn(name string, cf api.CompareFn) {
 	ssn.jobOrderFns[name] = cf
 }
 
-// AddQueueOrderFn add queue order function
+// AddQueueOrderFn 注册队列排序函数（QueueOrderFn），用于在分配资源时确定多个队列的调度处理次序。
 func (ssn *Session) AddQueueOrderFn(name string, qf api.CompareFn) {
 	ssn.queueOrderFns[name] = qf
 }
 
-// AddVictimQueueOrderFn add victim job order function
+// AddVictimQueueOrderFn 注册受害者队列排序函数，在发生跨队列抢占/回收时决定优先从哪个队列驱逐资源。
 func (ssn *Session) AddVictimQueueOrderFn(name string, vcf api.VictimCompareFn) {
 	ssn.victimQueueOrderFns[name] = vcf
 }
 
-// AddClusterOrderFn add queue order function
+// AddClusterOrderFn 注册多集群排序函数，用于多集群调度场景中挑选最合适的集群。
 func (ssn *Session) AddClusterOrderFn(name string, qf api.CompareFn) {
 	ssn.clusterOrderFns[name] = qf
 }
 
-// AddTaskOrderFn add task order function
+// AddTaskOrderFn 注册任务排序函数（TaskOrderFn），决定同一个 Job 内部各个 Task 被调度的先后次序。
 func (ssn *Session) AddTaskOrderFn(name string, cf api.CompareFn) {
 	ssn.taskOrderFns[name] = cf
 }
 
-// AddPreemptableFn add preemptable function
+// AddPreemptableFn 注册抢占判定函数（PreemptableFn），在同一队列内部有高优先级任务因资源不足受阻时，
+// 筛选允许被该任务抢占的低优先级受害者任务列表。
 func (ssn *Session) AddPreemptableFn(name string, cf api.EvictableFn) {
 	if ssn.preemptableFns == nil {
 		ssn.preemptableFns = map[string]api.EvictableFn{}
@@ -69,7 +70,8 @@ func (ssn *Session) AddPreemptableFn(name string, cf api.EvictableFn) {
 	ssn.preemptableFns[name] = cf
 }
 
-// AddReclaimableFn add Reclaimable function
+// AddReclaimableFn 注册资源回收判定函数（ReclaimableFn），用于在跨队列场景下，
+// 当某队列尚未达到保障配额（Deserved/Guarantee）时，从超用队列中筛选允许回收的受害者任务。
 func (ssn *Session) AddReclaimableFn(name string, rf api.EvictableFn) {
 	if ssn.reclaimableFns == nil {
 		ssn.reclaimableFns = map[string]api.EvictableFn{}
@@ -77,7 +79,7 @@ func (ssn *Session) AddReclaimableFn(name string, rf api.EvictableFn) {
 	ssn.reclaimableFns[name] = rf
 }
 
-// AddUnifiedEvictableFn registers a UnifiedEvictableFn for gang-aware victim filtering.
+// AddUnifiedEvictableFn 注册统一受害者过滤函数，支持感知 Gang 约束的驱逐判定，保证受害者被驱逐时不破坏受害者所属 Job 的最小成团数。
 func (ssn *Session) AddUnifiedEvictableFn(name string, fn api.UnifiedEvictableFn) {
 	if ssn.unifiedEvictableFns == nil {
 		ssn.unifiedEvictableFns = map[string]api.UnifiedEvictableFn{}
@@ -85,107 +87,107 @@ func (ssn *Session) AddUnifiedEvictableFn(name string, fn api.UnifiedEvictableFn
 	ssn.unifiedEvictableFns[name] = fn
 }
 
-// AddJobReadyFn add JobReady function
+// AddJobReadyFn 注册作业就绪判定函数（JobReadyFn），判断 Job 是否已满足最小可用任务数（minAvailable）等 Gang 就绪条件。
 func (ssn *Session) AddJobReadyFn(name string, vf api.ValidateFn) {
 	ssn.jobReadyFns[name] = vf
 }
 
-// AddJobPipelinedFn add pipelined function
+// AddJobPipelinedFn 注册作业流水线判定函数（JobPipelinedFn），判断 Job 是否在等待被驱逐任务释放资源后能够就绪（Pipelined 状态）。
 func (ssn *Session) AddJobPipelinedFn(name string, vf api.VoteFn) {
 	ssn.jobPipelinedFns[name] = vf
 }
 
-// AddPredicateFn add Predicate function
+// AddPredicateFn 注册节点预选过滤函数（PredicateFn），用于判断单个 Node 是否满足 Task 的硬性运行约束（如资源余量、节点亲和、污点容忍等）。
 func (ssn *Session) AddPredicateFn(name string, pf api.PredicateFn) {
 	ssn.predicateFns[name] = pf
 }
 
-// AddQueueNodeFilterFn adds a session-stable queue node filter.
+// AddQueueNodeFilterFn 注册队列维度的节点过滤器，预先过滤掉不属于该队列可用范围的节点。
 func (ssn *Session) AddQueueNodeFilterFn(name string, fn api.QueueNodeFilterFn) {
 	ssn.queueNodeFilterFns[name] = fn
 }
 
-// AddPrePredicateFn add PrePredicate function
+// AddPrePredicateFn 注册预选前置检查函数（PrePredicateFn），用于在批量预选前预先计算全局或拓扑缓存。
 func (ssn *Session) AddPrePredicateFn(name string, pf api.PrePredicateFn) {
 	ssn.prePredicateFns[name] = pf
 }
 
-// AddBestNodeFn add BestNode function
+// AddBestNodeFn 注册最优节点挑选函数，直接计算并返回任务最适合运行的节点。
 func (ssn *Session) AddBestNodeFn(name string, pf api.BestNodeFn) {
 	ssn.bestNodeFns[name] = pf
 }
 
-// AddNodeOrderFn add Node order function
+// AddNodeOrderFn 注册节点打分函数（NodeOrderFn），用于对通过预选的候选节点逐个进行打分优选。
 func (ssn *Session) AddNodeOrderFn(name string, pf api.NodeOrderFn) {
 	ssn.nodeOrderFns[name] = pf
 }
 
-// AddHyperNodeOrderFn add hyperNode order function
+// AddHyperNodeOrderFn 注册超节点拓扑域打分排序函数。
 func (ssn *Session) AddHyperNodeOrderFn(name string, fn api.HyperNodeOrderFn) {
 	ssn.hyperNodeOrderFns[name] = fn
 }
 
-// AddBatchNodeOrderFn add Batch Node order function
+// AddBatchNodeOrderFn 注册批量节点打分函数（BatchNodeOrderFn），支持对一批节点批量并行评估打分。
 func (ssn *Session) AddBatchNodeOrderFn(name string, pf api.BatchNodeOrderFn) {
 	ssn.batchNodeOrderFns[name] = pf
 }
 
-// AddNodeMapFn add Node map function
+// AddNodeMapFn 注册 Map-Reduce 打分流程中的 Map 函数。
 func (ssn *Session) AddNodeMapFn(name string, pf api.NodeMapFn) {
 	ssn.nodeMapFns[name] = pf
 }
 
-// AddNodeReduceFn add Node reduce function
+// AddNodeReduceFn 注册 Map-Reduce 打分流程中的 Reduce 函数。
 func (ssn *Session) AddNodeReduceFn(name string, pf api.NodeReduceFn) {
 	ssn.nodeReduceFns[name] = pf
 }
 
-// AddOverusedFn add overused function
+// AddOverusedFn 注册队列超用判定函数（OverusedFn），判断指定队列当前使用的资源是否已超出其分配配额。
 func (ssn *Session) AddOverusedFn(name string, fn api.ValidateFn) {
 	ssn.overusedFns[name] = fn
 }
 
-// AddPreemptiveFn add preemptive function
+// AddPreemptiveFn 注册可抢占候选验证函数，判断特定候选是否允许被抢占。
 func (ssn *Session) AddPreemptiveFn(name string, fn api.ValidateWithCandidateFn) {
 	ssn.preemptiveFns[name] = fn
 }
 
-// AddAllocatableFn add allocatable function
+// AddAllocatableFn 注册可分配判定函数，判断当前是否允许向队列或 Job 分配资源。
 func (ssn *Session) AddAllocatableFn(name string, fn api.AllocatableFn) {
 	ssn.allocatableFns[name] = fn
 }
 
-// AddJobValidFn add jobvalid function
+// AddJobValidFn 注册作业准入校验函数（JobValidFn），在处理作业前校验其规范配置是否合法有效。
 func (ssn *Session) AddJobValidFn(name string, fn api.ValidateExFn) {
 	ssn.jobValidFns[name] = fn
 }
 
-// AddJobEnqueueableFn add jobenqueueable function
+// AddJobEnqueueableFn 注册作业可入队判定函数，判断一个处于 Pending 状态的 Job 当前是否允许进入 Inqueue 状态。
 func (ssn *Session) AddJobEnqueueableFn(name string, fn api.VoteFn) {
 	ssn.jobEnqueueableFns[name] = fn
 }
 
-// AddJobEnqueuedFn add jobEnqueued function
+// AddJobEnqueuedFn 注册作业入队后的回调函数，用于在作业入队成功后执行插件相关后置处理。
 func (ssn *Session) AddJobEnqueuedFn(name string, fn api.JobEnqueuedFn) {
 	ssn.jobEnqueuedFns[name] = fn
 }
 
-// AddTargetJobFn add targetjob function
+// AddTargetJobFn 注册目标作业查找函数，在抢占等场景下定位触发调度的目标 Job。
 func (ssn *Session) AddTargetJobFn(name string, fn api.TargetJobFn) {
 	ssn.targetJobFns[name] = fn
 }
 
-// AddReservedNodesFn add reservedNodesFn function
+// AddReservedNodesFn 注册节点预留函数，将特定节点资源预留给指定作业或场景，避免被其他任务占用。
 func (ssn *Session) AddReservedNodesFn(name string, fn api.ReservedNodesFn) {
 	ssn.reservedNodesFns[name] = fn
 }
 
-// AddVictimTasksFns add victimTasksFns function
+// AddVictimTasksFns 注册受害者任务筛选函数链。
 func (ssn *Session) AddVictimTasksFns(name string, fns []api.VictimTasksFn) {
 	ssn.victimTasksFns[name] = fns
 }
 
-// AddJobStarvingFns add jobStarvingFns function
+// AddJobStarvingFns 注册作业饥饿判定函数（JobStarvingFn），检测作业是否由于长时间得不到资源而处于饥饿状态，以便触发抢占。
 func (ssn *Session) AddJobStarvingFns(name string, fn api.ValidateFn) {
 	ssn.jobStarvingFns[name] = fn
 }
@@ -206,32 +208,36 @@ func (ssn *Session) AddSimulatePredicateFn(name string, fn api.SimulatePredicate
 	ssn.simulatePredicateFns[name] = fn
 }
 
-// AddSubJobReadyFn add SubJobReady function
+// AddSubJobReadyFn 注册子作业就绪判定函数。
 func (ssn *Session) AddSubJobReadyFn(name string, vf api.ValidateFn) {
 	ssn.subJobReadyFns[name] = vf
 }
 
-// AddSubJobPipelinedFn add SubJobPipelined function
+// AddSubJobPipelinedFn 注册子作业流水线判定函数。
 func (ssn *Session) AddSubJobPipelinedFn(name string, vf api.VoteFn) {
 	ssn.subJobPipelinedFns[name] = vf
 }
 
-// AddSubJobOrderFn add SubJobOrderFn function
+// AddSubJobOrderFn 注册子作业排序函数。
 func (ssn *Session) AddSubJobOrderFn(name string, fn api.CompareFn) {
 	ssn.subJobOrderFns[name] = fn
 }
 
-// AddHyperNodeGradientForJobFn add HyperNodeGradientForJobFn function
+// AddHyperNodeGradientForJobFn 注册作业级别的超节点拓扑梯度评估函数。
 func (ssn *Session) AddHyperNodeGradientForJobFn(name string, fn api.HyperNodeGradientForJobFn) {
 	ssn.hyperNodeGradientForJobFns[name] = fn
 }
 
-// AddHyperNodeGradientForSubJobFn add HyperNodeGradientForSubJobFn function
+// AddHyperNodeGradientForSubJobFn 注册子作业级别的超节点拓扑梯度评估函数。
 func (ssn *Session) AddHyperNodeGradientForSubJobFn(name string, fn api.HyperNodeGradientForSubJobFn) {
 	ssn.hyperNodeGradientForSubJobFns[name] = fn
 }
 
-// Reclaimable invoke reclaimable function of the plugins
+// Reclaimable 调用各插件注册的跨队列资源回收（Reclaim）函数。
+// 分层（Tier）评估逻辑：
+// 1. 按 Tier 优先级从高到低遍历；
+// 2. 在同一 Tier 内部，多个插件返回的候选受害者名单取交集（Intersection）；
+// 3. 一旦某个 Tier 的插件做出明确决策（筛选出有效受害者），立即采纳并返回，不再评估后续低优先级 Tier。
 func (ssn *Session) Reclaimable(reclaimer *api.TaskInfo, reclaimees []*api.TaskInfo) []*api.TaskInfo {
 	var victims []*api.TaskInfo
 
@@ -280,7 +286,8 @@ func (ssn *Session) Reclaimable(reclaimer *api.TaskInfo, reclaimees []*api.TaskI
 	return victims
 }
 
-// Preemptable invoke preemptable function of the plugins
+// Preemptable 调用各插件注册的队列内抢占（Preempt）函数。
+// 用于在同一队列内部，为高优先级任务挑选可抢占的低优先级受害者任务。语义与 Tier 评估规则与 Reclaimable 一致。
 func (ssn *Session) Preemptable(preemptor *api.TaskInfo, preemptees []*api.TaskInfo) []*api.TaskInfo {
 	var victims []*api.TaskInfo
 
@@ -330,8 +337,8 @@ func (ssn *Session) Preemptable(preemptor *api.TaskInfo, preemptees []*api.TaskI
 	return victims
 }
 
-// UnifiedEvictable invokes UnifiedEvictableFn plugins for gang-aware victim filtering.
-// Tier walking and intersection semantics match Preemptable/Reclaimable.
+// UnifiedEvictable 调用统一受害者过滤函数，支持感知 Gang 约束的驱逐判定。
+// 分层遍历及交集求取语义与 Preemptable/Reclaimable 保持一致。
 func (ssn *Session) UnifiedEvictable(ctx *api.EvictionContext, candidates []*api.TaskInfo) []*api.TaskInfo {
 	var victims []*api.TaskInfo
 
@@ -371,7 +378,7 @@ func (ssn *Session) UnifiedEvictable(ctx *api.EvictionContext, candidates []*api
 	return victims
 }
 
-// Overused invoke overused function of the plugins
+// Overused 调用各插件的超用检测函数，判断指定队列当前是否超配额使用。
 func (ssn *Session) Overused(queue *api.QueueInfo) bool {
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
@@ -391,7 +398,7 @@ func (ssn *Session) Overused(queue *api.QueueInfo) bool {
 	return false
 }
 
-// Preemptive invokes preemptive functions of the plugins.
+// Preemptive 调用各插件的可抢占验证函数，校验 candidates 列表是否允许被抢占。
 func (ssn *Session) Preemptive(queue *api.QueueInfo, candidates []*api.TaskInfo) bool {
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
@@ -411,7 +418,7 @@ func (ssn *Session) Preemptive(queue *api.QueueInfo, candidates []*api.TaskInfo)
 	return true
 }
 
-// Allocatable invoke allocatable function of the plugins
+// Allocatable 调用各插件的可分配判定函数，检查指定队列是否允许向 candidate 任务分配资源。
 func (ssn *Session) Allocatable(queue *api.QueueInfo, candidate *api.TaskInfo) bool {
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {

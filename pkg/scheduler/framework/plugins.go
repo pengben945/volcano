@@ -30,15 +30,18 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// pluginMutex 保护 pluginBuilders 和 actionMap 的并发读写安全。
 var pluginMutex sync.RWMutex
 
-// PluginBuilder plugin management
+// PluginBuilder 是创建 Plugin 实例的工厂函数签名。
+// 接收解析后的 Arguments 参数，返回具体 Plugin 实例。
 type PluginBuilder = func(Arguments) Plugin
 
-// Plugin management
+// pluginBuilders 保存所有已注册的插件构建函数，以插件名称为键。
 var pluginBuilders = map[string]PluginBuilder{}
 
-// RegisterPluginBuilder register the plugin
+// RegisterPluginBuilder 注册一个插件构建器。
+// 内置插件通常在各插件包的 init() 函数中调用此方法完成自我注册。
 func RegisterPluginBuilder(name string, pc PluginBuilder) {
 	pluginMutex.Lock()
 	defer pluginMutex.Unlock()
@@ -46,7 +49,7 @@ func RegisterPluginBuilder(name string, pc PluginBuilder) {
 	pluginBuilders[name] = pc
 }
 
-// CleanupPluginBuilders cleans up all the plugin
+// CleanupPluginBuilders 清空所有已注册的插件构建器（主要用于单元测试隔离）。
 func CleanupPluginBuilders() {
 	pluginMutex.Lock()
 	defer pluginMutex.Unlock()
@@ -54,7 +57,7 @@ func CleanupPluginBuilders() {
 	pluginBuilders = map[string]PluginBuilder{}
 }
 
-// GetPluginBuilder get the pluginbuilder by name
+// GetPluginBuilder 根据插件名称查找对应的插件构建器。
 func GetPluginBuilder(name string) (PluginBuilder, bool) {
 	pluginMutex.RLock()
 	defer pluginMutex.RUnlock()
@@ -63,7 +66,8 @@ func GetPluginBuilder(name string) (PluginBuilder, bool) {
 	return pb, found
 }
 
-// LoadCustomPlugins loads custom implement plugins
+// LoadCustomPlugins 从指定目录动态加载以 Go Plugin (.so) 形式构建的外部自定义插件。
+// 使得用户无需重新编译整个 Volcano 调度器即可扩展调度算法。
 func LoadCustomPlugins(pluginsDir string) error {
 	pluginPaths, _ := filepath.Glob(fmt.Sprintf("%s/*.so", pluginsDir))
 	for _, pluginPath := range pluginPaths {
@@ -79,10 +83,12 @@ func LoadCustomPlugins(pluginsDir string) error {
 	return nil
 }
 
+// getPluginName 从动态库文件路径中提取插件名（去掉后缀）。
 func getPluginName(pluginPath string) string {
 	return strings.TrimSuffix(filepath.Base(pluginPath), filepath.Ext(pluginPath))
 }
 
+// loadPluginBuilder 从动态库 (.so) 中解析符号 "New" 并转换为 PluginBuilder。
 func loadPluginBuilder(pluginPath string) (PluginBuilder, error) {
 	plug, err := plugin.Open(pluginPath)
 	if err != nil {
@@ -102,10 +108,11 @@ func loadPluginBuilder(pluginPath string) (PluginBuilder, error) {
 	return builder, nil
 }
 
-// Action management
+// actionMap 保存所有已注册的 Action 实例，以 Action 名称为键（如 "enqueue", "allocate" 等）。
 var actionMap = map[string]Action{}
 
-// RegisterAction register action
+// RegisterAction 注册一个 Action 动作实现。
+// 内置 Action 在各自包的 init() 中调用此方法注册。
 func RegisterAction(act Action) {
 	pluginMutex.Lock()
 	defer pluginMutex.Unlock()
@@ -113,7 +120,7 @@ func RegisterAction(act Action) {
 	actionMap[act.Name()] = act
 }
 
-// GetAction get the action by name
+// GetAction 根据动作名称查找对应的 Action 实例。
 func GetAction(name string) (Action, bool) {
 	pluginMutex.RLock()
 	defer pluginMutex.RUnlock()

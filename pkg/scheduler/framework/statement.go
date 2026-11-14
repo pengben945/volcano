@@ -32,43 +32,48 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/metrics"
 )
 
-// Operation type
+// Operation 表示在调度事务中执行的具体操作类型。
 type Operation int8
 
 const (
-	// Evict op
+	// Evict 驱逐操作：标记一个正在运行的 Task 进行驱逐释放节点资源
 	Evict = iota
-	// Pipeline op
+	// Pipeline 流水线/预留操作：在目标节点上有 Task 正在释放（Releasing）时，预先占位等待资源释放
 	Pipeline
-	// Allocate op
+	// Allocate 分配操作：将 Task 分配到有充足空闲资源的节点上
 	Allocate
 )
 
+// operation 内部结构，封装具体操作类型、涉及的任务对象以及操作原因。
 type operation struct {
 	name   Operation
 	task   *api.TaskInfo
 	reason string
 }
 
-// Statement structure
+// Statement 是 Volcano 调度框架的核心事务抽象。
+// 它提供类似数据库事务（ACID 中的 A 和 C）的原子化操作机制：
+// 在进行资源试探、抢占或 Gang 批量调度时，所做的 Evict/Pipeline/Allocate 操作先在 Session 内存快照中生效；
+// - 如果后续整个 Gang 或调度决策成功，调用 Commit() 将操作真正提交到底层 cache（发起异步绑定或驱逐 API 调用）；
+// - 如果中途校验失败（如成团失败），调用 Discard() 逆序回滚所有内存状态变更，恢复如初。
 type Statement struct {
 	operations []operation
 	ssn        *Session
 }
 
-// NewStatement returns new statement object
+// NewStatement 为给定的调度会话创建一个新的事务对象。
 func NewStatement(ssn *Session) *Statement {
 	return &Statement{
 		ssn: ssn,
 	}
 }
 
-// AddOperation adds operation to statement
+// Operations 返回当前事务内累积的所有操作列表。
 func (s *Statement) Operations() []operation {
 	return s.operations
 }
 
-// HasEvictions returns whether the statement contains at least one eviction operation.
+// HasEvictions 检查当前事务是否包含至少一个驱逐（Evict）操作。
 func (s *Statement) HasEvictions() bool {
 	for _, op := range s.operations {
 		if op.name == Evict {
@@ -78,7 +83,11 @@ func (s *Statement) HasEvictions() bool {
 	return false
 }
 
-// Evict the pod
+// Evict 在事务中执行任务驱逐：
+// 1. 将 Job 内该任务的状态置为 Releasing；
+// 2. 更新所属 Node 上的任务状态；
+// 3. 触发注册的 DeallocateFunc 事件处理器；
+// 4. 将驱逐操作记录进事务操作日志。
 func (s *Statement) Evict(reclaimee *api.TaskInfo, reason string) {
 	// Update status in session
 	if job, found := s.ssn.Jobs[reclaimee.Job]; found {
@@ -109,6 +118,7 @@ func (s *Statement) Evict(reclaimee *api.TaskInfo, reason string) {
 	})
 }
 
+// evict 事务提交时调用：向底层 cache 发送实际驱逐请求；若失败则尝试恢复内存状态。
 func (s *Statement) evict(reclaimee *api.TaskInfo, reason string) error {
 	if err := s.ssn.cache.Evict(reclaimee, reason); err != nil {
 		if e := s.unevict(reclaimee); e != nil {
@@ -120,6 +130,7 @@ func (s *Statement) evict(reclaimee *api.TaskInfo, reason string) error {
 	return nil
 }
 
+// unevict 驱逐回滚：将任务状态恢复为 Running，恢复 Node 占用，并以 Restore=true 触发 Allocate 回调。
 func (s *Statement) unevict(reclaimee *api.TaskInfo) error {
 	// Update status in session
 	job, found := s.ssn.Jobs[reclaimee.Job]
@@ -147,7 +158,9 @@ func (s *Statement) unevict(reclaimee *api.TaskInfo) error {
 	return nil
 }
 
-// Pipeline the task for the node
+// Pipeline 在事务中执行流水线预留操作：
+// 当抢占或回收导致某些任务被驱逐（正在释放资源）时，待调度任务可先 Pipeline 绑定到该节点上；
+// 若执行失败，会自动触发 unPipeline 回滚已完成的中间步骤。
 func (s *Statement) Pipeline(task *api.TaskInfo, hostname string, evictionOccurred bool) (err error) {
 	defer func() {
 		if err == nil {
@@ -218,10 +231,12 @@ func (s *Statement) Pipeline(task *api.TaskInfo, hostname string, evictionOccurr
 func (s *Statement) pipeline(task *api.TaskInfo) {
 }
 
+// UnPipeline 显式回滚指定任务的 Pipeline 状态。
 func (s *Statement) UnPipeline(task *api.TaskInfo) error {
 	return s.unPipeline(task)
 }
 
+// unPipeline 撤销 Pipeline 操作：任务状态重置为 Pending，从节点中移除，并触发 DeallocateFunc 回调。
 func (s *Statement) unPipeline(task *api.TaskInfo) error {
 	job, found := s.ssn.Jobs[task.Job]
 	if found {
@@ -254,7 +269,11 @@ func (s *Statement) unPipeline(task *api.TaskInfo) error {
 	return nil
 }
 
-// Allocate the task to node
+// Allocate 在事务中尝试将任务分配到指定节点：
+// 1. 将任务在 Job 中的状态更新为 Allocated；
+// 2. 将任务添加到目标节点的已用资源中；
+// 3. 触发注册的 AllocateFunc 事件回调；
+// 4. 若出现任何失败，自动触发 unallocate 回滚。
 func (s *Statement) Allocate(task *api.TaskInfo, nodeInfo *api.NodeInfo) (err error) {
 	defer func() {
 		if err != nil {
@@ -326,6 +345,7 @@ func (s *Statement) Allocate(task *api.TaskInfo, nodeInfo *api.NodeInfo) (err er
 	return nil
 }
 
+// allocate 提交分配操作：构建 BindContext，加入 cache 异步绑定队列，并将任务状态置为 Binding。
 func (s *Statement) allocate(task *api.TaskInfo) error {
 	bindContext := s.ssn.CreateBindContext(task)
 	if err := s.ssn.cache.AddBindTask(bindContext); err != nil {
@@ -344,7 +364,7 @@ func (s *Statement) allocate(task *api.TaskInfo) error {
 	return nil
 }
 
-// unallocate the pod for task
+// unallocate 撤销任务分配：将任务从已分配节点卸载，重置为 Pending 状态并通知 DeallocateFunc。
 func (s *Statement) unallocate(task *api.TaskInfo) error {
 	// Update status in session
 	job, found := s.ssn.Jobs[task.Job]
@@ -373,7 +393,7 @@ func (s *Statement) unallocate(task *api.TaskInfo) error {
 	return nil
 }
 
-// Discard operation for evict, pipeline and allocate
+// Discard 事务回滚：逆序撤销当前事务中所有未提交的操作（Evict 回滚为 unevict，Pipeline 回滚为 unPipeline，Allocate 回滚为 unallocate）。
 func (s *Statement) Discard() {
 	klog.V(3).Info("Discarding operations ...")
 	for i := len(s.operations) - 1; i >= 0; i-- {
@@ -400,7 +420,8 @@ func (s *Statement) Discard() {
 	s.operations = nil
 }
 
-// Commit operation for evict and pipeline
+// Commit 事务提交：将当前事务中的所有操作真正提交生效。
+// Evict 向 Kubernetes API 发起 Pod 删除/驱逐；Allocate 发起向 API Server 的 Pod 节点绑定请求。
 func (s *Statement) Commit() {
 	klog.V(3).Info("Committing operations ...")
 	for _, op := range s.operations {
@@ -426,12 +447,9 @@ func (s *Statement) Commit() {
 	s.operations = nil
 }
 
-// Merge transfers operations from the given statements into this statement.
-// The source statements share the same session, so their in-memory state changes
-// (evictions, pipelines) are already reflected in the session. Merge moves ownership
-// of those operation records so they will be committed or discarded with this statement.
-// After merging, source statements' operations are cleared to prevent double-commit or
-// double-discard.
+// Merge 将其他 Statement 的操作记录转移并入当前 Statement。
+// 由于多个 Statement 共享同一个 Session 快照，内存状态变更已生效，Merge 移交操作的所有权，
+// 并清空源 Statement 避免出现重复 Commit 或重复 Discard。
 func (s *Statement) Merge(stmts ...*Statement) {
 	for _, stmt := range stmts {
 		s.operations = append(s.operations, stmt.operations...)
@@ -439,6 +457,8 @@ func (s *Statement) Merge(stmts ...*Statement) {
 	}
 }
 
+// SaveOperations 对一组 Statement 中的操作进行深拷贝备份，返回一个保存有操作快照的独立 Statement 对象。
+// 可用于多分支决策试探（如多种调度方案比选），选定后再通过 RecoverOperations 恢复。
 func SaveOperations(stmts ...*Statement) *Statement {
 	stmtTmp := &Statement{}
 	for _, stmt := range stmts {
@@ -456,6 +476,7 @@ func SaveOperations(stmts ...*Statement) *Statement {
 	return stmtTmp
 }
 
+// RecoverOperations 在当前 Statement 上重放先前备份的一组操作。
 func (s *Statement) RecoverOperations(stmt *Statement) error {
 	if stmt == nil {
 		return errors.New("statement is nil")
@@ -483,6 +504,7 @@ func (s *Statement) RecoverOperations(stmt *Statement) error {
 	return nil
 }
 
+// outputOperations 输出事务操作的调试日志。
 func (s *Statement) outputOperations(msg string, level klog.Level) {
 	if !klog.V(level).Enabled() {
 		return
